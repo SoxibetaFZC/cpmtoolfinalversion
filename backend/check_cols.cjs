@@ -7,7 +7,7 @@ const pool = new Pool({
 
 async function checkCols() {
   try {
-    const { rows: cols } = await pool.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'employee_subtheme_alignment'");
+    const { rows: cols } = await pool.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'profiles' AND column_name ILIKE '%password%'");
     console.log(JSON.stringify(cols, null, 2));
   } catch (err) {
     console.error(err);
