@@ -28,9 +28,9 @@ app.post('/api/db/auth/signup', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     // Insert into profiles or a custom users table
     const { rows } = await pool.query(
-      `INSERT INTO profiles (id, auth_email, first_name, last_name, role) 
-       VALUES (gen_random_uuid(), $1, $2, $3, $4) RETURNING *`,
-      [email, data?.first_name, data?.last_name, data?.role || 'employee']
+      `INSERT INTO profiles (id, auth_email, first_name, last_name, role, password_hash) 
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5) RETURNING *`,
+      [email, data?.first_name, data?.last_name, data?.role || 'employee', hashedPassword]
     );
     const userRow = rows[0];
     const user = { 
@@ -52,6 +52,11 @@ app.post('/api/db/auth/login', async (req, res) => {
     if (rows.length === 0) return res.status(400).json({ error: 'User not found' });
     
     const userRow = rows[0];
+    
+    // VERIFY PASSWORD
+    const isPasswordValid = await bcrypt.compare(password, userRow.password_hash);
+    if (!isPasswordValid) return res.status(401).json({ error: 'Invalid password' });
+
     const user = { 
         id: userRow.id, 
         email: userRow.auth_email, 
