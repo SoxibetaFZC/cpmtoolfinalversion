@@ -7,10 +7,10 @@ const pool = new Pool({
 
 async function checkCols() {
   try {
-    const { rows } = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'global_themes'");
-    console.log(rows);
+    const { rows: cols } = await pool.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'employee_subtheme_alignment'");
+    console.log(JSON.stringify(cols, null, 2));
   } catch (err) {
-    console.error("Error:", err);
+    console.error(err);
   } finally {
     await pool.end();
   }
