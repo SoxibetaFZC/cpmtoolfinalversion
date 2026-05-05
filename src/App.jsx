@@ -347,6 +347,8 @@ function Employee({ profile, activeUser, showToast }) {
   const [editSubthemeId, setEditSubthemeId] = useState(null);
   const [editThemeId, setEditThemeId] = useState(null);
   const [isPillarPickerOpen, setIsPillarPickerOpen] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(new Date().toLocaleString('en-US', { month: 'short' }).toUpperCase());
+  const [selectedYear, setSelectedYear] = useState(String(CURRENT_YEAR));
   const [managerProfile, setManagerProfile] = useState(null);
 
   const currentYear = new Date().getFullYear();
@@ -379,7 +381,8 @@ function Employee({ profile, activeUser, showToast }) {
         const [d, m, y] = firstDateStr.split('/');
         dateToTest = `${y}-${m}-${d}`;
       }
-      return isCurrentMonth(dateToTest);
+      const d = new Date(dateToTest);
+      return d.toLocaleString('en-US', { month: 'short' }).toUpperCase() === selectedMonth && d.getFullYear() === parseInt(selectedYear);
     } catch (e) { return false; }
   }).length;
   const [myReviews, setMyReviews] = useState([]);
@@ -389,7 +392,7 @@ function Employee({ profile, activeUser, showToast }) {
   useEffect(() => {
     refreshEmployeeDash();
     fetchReviewsHistory();
-  }, [activeUser, refreshCount]);
+  }, [activeUser, refreshCount, selectedMonth, selectedYear]);
 
   async function fetchReviewsHistory() {
     const { data } = await supabase
@@ -520,7 +523,22 @@ function Employee({ profile, activeUser, showToast }) {
 
     // NEW: Populate Team & TeamThemes for the Bridge View (Managers/Directors)
     if (profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') {
-      const { data: reports } = await supabase.from('profiles').select('*').eq('manager_id', activeUser);
+      let reports = [];
+      if (profile?.role === 'hr') {
+        const { data } = await supabase.from('profiles').select('*');
+        reports = data || [];
+      } else {
+        const { data: hierarchy } = await supabase.rpc('get_reports_hierarchy', { manager_uuid: activeUser });
+        if (hierarchy && hierarchy.length) {
+          const ids = hierarchy.map(h => h.profile_id);
+          const { data } = await supabase.from('profiles').select('*').in('id', ids);
+          reports = data || [];
+        } else {
+          const { data: direct } = await supabase.from('profiles').select('*').eq('manager_id', activeUser);
+          reports = direct || [];
+        }
+      }
+      
       setTeam(reports || []);
       
       if (reports && reports.length > 0) {
@@ -811,7 +829,27 @@ function Employee({ profile, activeUser, showToast }) {
         </div>
         <div className="emp-right">
           <Badge cls="yellow" dot>In Progress</Badge>
-          <div className="v-stack"><div className="period-label-sm">Review Period</div><div className="period-val">APR 2026</div></div>
+          <div className="v-stack"><div className="period-label-sm">Review Period</div><div className="period-val">{selectedMonth} {selectedYear}</div></div>
+          <div style={{ display: 'flex', gap: 10, marginLeft: 20 }}>
+            <select 
+              className="input" 
+              style={{ width: 80, height: 32, fontSize: 11, padding: '0 8px' }} 
+              value={selectedMonth} 
+              onChange={e => setSelectedMonth(e.target.value)}
+            >
+              {['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select 
+              className="input" 
+              style={{ width: 80, height: 32, fontSize: 11, padding: '0 8px' }} 
+              value={selectedYear} 
+              onChange={e => setSelectedYear(e.target.value)}
+            >
+              <option value="2026">2026</option>
+              <option value="2025">2025</option>
+              <option value="2024">2024</option>
+            </select>
+          </div>
         </div>
       </div>
       {/* 1. STRATEGIC PILLARS HEADER (ONLY ACTIVE THEMES) */}
@@ -1130,7 +1168,7 @@ function Employee({ profile, activeUser, showToast }) {
         <div className="frame" style={{ borderLeft: '4px solid var(--cyan)', background: '#fff', marginTop: 40, padding: isBridgeCollapsed ? '12px 24px' : 24, borderRadius: 12, boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isBridgeCollapsed ? 0 : 24 }}>
              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-               <div className="sec-title" style={{ margin: 0, fontSize: 14, color: 'var(--cyan)' }}>| Team Strategic Alignment (Bridge View)</div>
+               <div className="sec-title" style={{ margin: 0, fontSize: 14, color: 'var(--cyan)' }}>| Team Strategic Alignment (Bridge View) — {selectedMonth} {selectedYear}</div>
                {totalTeamAlignments > 0 ? (
                  <button 
                    onClick={() => setIsBridgeCollapsed(!isBridgeCollapsed)}
@@ -1169,7 +1207,8 @@ function Employee({ profile, activeUser, showToast }) {
                     const [d, m, y] = firstDateStr.split('/');
                     dateToTest = `${y}-${m}-${d}`;
                   }
-                  return isCurrentMonth(dateToTest);
+                  const d = new Date(dateToTest);
+                  return d.toLocaleString('en-US', { month: 'short' }).toUpperCase() === selectedMonth && d.getFullYear() === parseInt(selectedYear);
                 } catch (e) {
                   return false;
                 }
@@ -1189,24 +1228,26 @@ function Employee({ profile, activeUser, showToast }) {
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                             <div style={{ fontSize: 11, fontWeight: 900, color: 'var(--purple)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{rt.title || rt.name}</div>
                             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                               <button 
-                                 className="badge badge-green" 
-                                 style={{ cursor: 'pointer', border: 'none', padding: '4px 12px', fontSize: 10, fontWeight: 800 }} 
-                                 onClick={() => {
-                                   if (window.confirm("Verify this sub-theme?")) {
-                                     handleSubthemeAction(sub?.id, 'approve');
-                                   }
-                                 }}
-                               >✓ Verify</button>
-                               <button 
-                                 className="badge badge-yellow" 
-                                 style={{ cursor: 'pointer', border: 'none', padding: '4px 12px', fontSize: 10, fontWeight: 800 }} 
-                                 onClick={() => {
-                                   setReturningSubthemeId(sub?.id);
-                                   setSubthemeFeedback("");
-                                 }}
-                               >↩ Return</button>
-                               <Badge cls="gray" style={{ padding: '4px 10px', fontSize: 11 }}>April 2026</Badge>
+                               <div style={{ display: 'flex', gap: 4 }}>
+                                 <button 
+                                   className="badge badge-green" 
+                                   style={{ cursor: 'pointer', border: 'none', padding: '4px 12px', fontSize: 10, fontWeight: 800 }} 
+                                   onClick={() => {
+                                     if (window.confirm("Verify this sub-theme?")) {
+                                       handleSubthemeAction(sub?.id, 'approve');
+                                     }
+                                   }}
+                                 >✓ Verify</button>
+                                 <button 
+                                   className="badge badge-yellow" 
+                                   style={{ cursor: 'pointer', border: 'none', padding: '4px 12px', fontSize: 10, fontWeight: 800 }} 
+                                   onClick={() => {
+                                     setReturningSubthemeId(sub?.id);
+                                     setSubthemeFeedback("");
+                                   }}
+                                 >↩ Return</button>
+                               </div>
+                               <Badge cls="gray" style={{ padding: '4px 10px', fontSize: 11 }}>{selectedMonth} {selectedYear}</Badge>
                             </div>
                           </div>
 
