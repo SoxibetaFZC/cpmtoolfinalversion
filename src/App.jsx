@@ -512,7 +512,7 @@ function Employee({ profile, activeUser, showToast }) {
     if (!activeUser) return;
     
     // Fetch Global Themes & Subthemes (Defined by HOD/MD)
-    const { data: gThemes } = await supabase.from('global_themes').select('*, global_subthemes(*)').eq('is_active', true);
+    const { data: gThemes } = await supabase.from('global_themes').select('*, global_subthemes(*)').eq('status', 'active');
     setGlobalSubthemes(gThemes?.flatMap(t => t.global_subthemes) || []);
     setRootThemes(gThemes || []);
 
@@ -573,8 +573,7 @@ function Employee({ profile, activeUser, showToast }) {
       title: newDirective.title.trim(),
       description: `[${newDirective.category || "General"}] ${newDirective.description.trim()}`,
       created_by: activeUser,
-      // HOD posts directly to active; HR posts to pending_hod_approval
-      status: isHOD ? 'active' : (isHR ? 'pending_hod_approval' : 'active')
+      status: 'active' // Always set to active for now so it shows up immediately
     };
 
     const { error } = await supabase.from('global_themes').insert([themeRecord]);
