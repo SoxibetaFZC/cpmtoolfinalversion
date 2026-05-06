@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS global_themes (
     description TEXT,
     created_by  UUID REFERENCES profiles(id),
     is_active   BOOLEAN DEFAULT true,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    status      TEXT
 );
 
 -- ----------------------------------------

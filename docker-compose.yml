@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    environment:
+      - MIGRATIONS_PATH=/app/database/migrations
     ports:
       - "5000:5000"
     env_file:

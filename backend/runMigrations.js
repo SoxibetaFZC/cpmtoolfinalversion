@@ -8,7 +8,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const MIGRATIONS_DIR = path.join(__dirname, '..', 'database', 'migrations');
+const MIGRATIONS_DIR = process.env.MIGRATIONS_PATH || path.join(__dirname, '..', 'database', 'migrations');
 
 async function runMigrations(pool) {
   // 1. Create tracking table if it doesn't exist
