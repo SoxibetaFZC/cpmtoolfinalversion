@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
+const { runMigrations } = require('./runMigrations');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -301,6 +303,13 @@ app.post('/api/db/query', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Pure Postgres Backend server running on http://localhost:${PORT}`);
+  try {
+    await runMigrations(pool);
+  } catch (err) {
+    console.error('💥  Migration error — server running but DB may be incomplete');
+    console.error('    Run: node database/migrate.js status');
+  }
+  console.log(`✅  Server ready\n`);
 });
