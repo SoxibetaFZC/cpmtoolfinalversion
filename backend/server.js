@@ -204,6 +204,19 @@ app.post('/api/db/query', async (req, res) => {
       }
     } 
     else if (action === 'insert') {
+        // --- SECURITY: MD Theme Limit (Max 4) ---
+        if (table === 'global_themes') {
+            const creatorId = payload[0].created_by || payload[0].employee_id;
+            const SATYA_ID = '00000000-0000-0000-0000-000000000001';
+            
+            if (creatorId === SATYA_ID) {
+                const { rows } = await pool.query('SELECT count(*) FROM global_themes WHERE (created_by = $1 OR employee_id = $1) AND status = \'active\'', [SATYA_ID]);
+                if (parseInt(rows[0].count) >= 4) {
+                    return res.status(403).json({ data: null, error: 'Restriction: Managing Director can post maximum 4 themes.' });
+                }
+            }
+        }
+
         const columns = Object.keys(payload[0]);
         const placeholders = [];
         payload.forEach((row) => {
