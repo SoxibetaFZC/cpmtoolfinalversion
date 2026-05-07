@@ -576,6 +576,16 @@ function Employee({ profile, activeUser, showToast }) {
       status: 'active' // Always set to active for now so it shows up immediately
     };
 
+    // --- SECURITY: MD Theme Limit (Max 4) ---
+    const SATYA_ID = '00000000-0000-0000-0000-000000000001';
+    if (activeUser === SATYA_ID) {
+      const existingThemesCount = rootThemes.filter(t => t.created_by === SATYA_ID || t.employee_id === SATYA_ID).length;
+      if (existingThemesCount >= 4) {
+        showToast("Restriction: Managing Director can post maximum 4 themes", "#ef4444");
+        return;
+      }
+    }
+
     const { error } = await supabase.from('global_themes').insert([themeRecord]);
 
     if (!error) {
@@ -707,12 +717,9 @@ function Employee({ profile, activeUser, showToast }) {
     // --- RESTRICTION 2: MD Theme Limit (Max 4 total) ---
     // If Satya is creating a NEW root theme (no pId, not an edit)
     if (activeUser === SATYA_ID && !pId && !existingId) {
-      // Check ALL themes (including pillars/locked) created by Satya
-      const myRootThemes = themes.filter(t => !t.parent_id && (t.assigned_by === SATYA_ID || t.employee_id === SATYA_ID));
-      // Also check rootThemes (which contains locked pillars from allThemes)
-      const myLockedPillars = rootThemes.filter(rt => rt.assigned_by === SATYA_ID || rt.employee_id === SATYA_ID);
+      const myRootThemesCount = rootThemes.filter(rt => rt.created_by === SATYA_ID || rt.employee_id === SATYA_ID).length;
 
-      if ((myRootThemes.length + myLockedPillars.length) >= 4) {
+      if (myRootThemesCount >= 4) {
         showToast("Restriction: Managing Director can post maximum 4 themes", "#ef4444");
         return;
       }
