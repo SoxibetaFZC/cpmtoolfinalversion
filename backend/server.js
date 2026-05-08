@@ -165,15 +165,23 @@ app.post('/api/db/query', async (req, res) => {
           }));
           return res.json({ data: enriched, error: null });
       } else {
-          sql = `SELECT * FROM ${table}`;
-          if (query.filters && query.filters.length > 0) {
-              const clauses = [];
-              query.filters.forEach(f => {
-                 if (f.type === 'eq') {
-                     clauses.push(`${f.col} = $${valIndex++}`); values.push(f.val);
-                 } else if (f.type === 'in') {
-                     clauses.push(`"${f.col}" = ANY($${valIndex++})`); values.push(f.val);
-                 } else if (f.type === 'or') {
+        if (table === 'global_themes') {
+            sql = `SELECT t.*, p.role as creator_role 
+                   FROM global_themes t 
+                   LEFT JOIN profiles p ON t.created_by = p.id`;
+        } else {
+            sql = `SELECT * FROM ${table}`;
+        }
+        
+        if (query.filters && query.filters.length > 0) {
+            const clauses = [];
+            query.filters.forEach(f => {
+               const colPrefix = table === 'global_themes' ? 't.' : '';
+               if (f.type === 'eq') {
+                   clauses.push(`${colPrefix}"${f.col}" = $${valIndex++}`); values.push(f.val);
+               } else if (f.type === 'in') {
+                   clauses.push(`${colPrefix}"${f.col}" = ANY($${valIndex++})`); values.push(f.val);
+               } else if (f.type === 'or') {
                      // Better OR parser for patterns like "auth_email.eq.user@example.com,id.eq.val"
                      const parts = f.val.split(',');
                      const orClauses = parts.map(part => {
@@ -189,9 +197,9 @@ app.post('/api/db/query', async (req, res) => {
                      });
                      clauses.push(`(${orClauses.join(' OR ')})`);
                  }
-              });
-              if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
-          }
+            });
+            if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
+        }
 
           if (query.order && query.order.length > 0) {
               const orderClauses = query.order.map(o => `"${o.col}" ${o.ascending ? 'ASC' : 'DESC'}`);
@@ -206,11 +214,11 @@ app.post('/api/db/query', async (req, res) => {
     else if (action === 'insert') {
         // --- SECURITY: MD Theme Limit (Max 4) ---
         if (table === 'global_themes') {
-            const creatorId = payload[0].created_by || payload[0].employee_id;
+            const creatorId = payload[0].created_by;
             const SATYA_ID = '00000000-0000-0000-0000-000000000001';
             
             if (creatorId === SATYA_ID) {
-                const { rows } = await pool.query('SELECT count(*) FROM global_themes WHERE (created_by = $1 OR employee_id = $1) AND status = \'active\'', [SATYA_ID]);
+                const { rows } = await pool.query('SELECT count(*) FROM global_themes WHERE created_by = $1 AND (status = \'active\' OR status = \'approved\')', [SATYA_ID]);
                 if (parseInt(rows[0].count) >= 4) {
                     return res.status(403).json({ data: null, error: 'Restriction: Managing Director can post maximum 4 themes.' });
                 }
@@ -315,6 +323,22 @@ app.post('/api/db/query', async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ data: null, error: error.message });
+  }
+});
+
+app.post('/api/db/sync-governance', async (req, res) => {
+  try {
+    // 1. Move pending/active themes from others to the HOD queue
+    await pool.query(
+      "UPDATE global_themes SET status = 'pending_hod_validation', is_active = 'false', cycle_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE (status = 'active' OR status IS NULL) AND created_by != '00000000-0000-0000-0000-000000000001'"
+    );
+    // 2. Ensure all 'approved' themes have the correct cycle_id and active flag
+    const { rowCount } = await pool.query(
+      "UPDATE global_themes SET cycle_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff', is_active = 'true' WHERE status = 'approved'"
+    );
+    res.json({ success: true, repaired: rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
