@@ -125,7 +125,7 @@ function Overview({ profile }) {
       setYesOutcomeCount(cycleReviews?.filter(r => r.overall_result === 'YES').length || 0);
 
       // 3. Themes for cycle
-      const { data: themes } = await supabase.from('global_themes').select('*').eq('is_active', true);
+      const { data: themes } = await supabase.from('global_themes').select('*').eq('status', 'approved');
       setCycleThemes(themes || []);
     }
     fetchOverviewData();
@@ -512,9 +512,22 @@ function Employee({ profile, activeUser, showToast }) {
     if (!activeUser) return;
     
     // Fetch Global Themes & Subthemes (Defined by HOD/MD)
-    const { data: gThemes } = await supabase.from('global_themes').select('*, global_subthemes(*)').eq('status', 'active');
-    setGlobalSubthemes(gThemes?.flatMap(t => t.global_subthemes) || []);
-    setRootThemes(gThemes || []);
+    const { data: gThemes } = await supabase.from('global_themes').select('*, global_subthemes(*)').eq('status', 'approved');
+    
+    // Manual join in frontend since we're using direct Supabase client
+    if (gThemes && gThemes.length > 0) {
+      const creatorIds = [...new Set(gThemes.map(t => t.created_by).filter(Boolean))];
+      const { data: pData } = await supabase.from('profiles').select('id, role').in('id', creatorIds);
+      const enriched = gThemes.map(t => {
+        const p = pData?.find(profile => profile.id === t.created_by);
+        return { ...t, creator_role: p?.role || 'hod' }; // Default to HOD for legacy/MD themes
+      });
+      setRootThemes(enriched);
+      setGlobalSubthemes(enriched.flatMap(t => t.global_subthemes || []));
+    } else {
+      setRootThemes([]);
+      setGlobalSubthemes([]);
+    }
 
     // Fetch existing alignments for this employee
     const { data: alignments } = await supabase.from('employee_subtheme_alignment').select('*, global_subthemes(*)').eq('employee_id', activeUser);
@@ -573,29 +586,15 @@ function Employee({ profile, activeUser, showToast }) {
       title: newDirective.title.trim(),
       description: `[${newDirective.category || "General"}] ${newDirective.description.trim()}`,
       created_by: activeUser,
-      status: 'active' // Always set to active for now so it shows up immediately
+      status: isHOD ? 'approved' : 'pending_hod_validation',
+      cycle_id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      is_active: isHOD ? 'true' : 'false'
     };
-
-    // --- SECURITY: MD Theme Limit (Max 4) ---
-    const SATYA_ID = '00000000-0000-0000-0000-000000000001';
-    if (activeUser === SATYA_ID) {
-      const existingThemesCount = rootThemes.filter(t => t.created_by === SATYA_ID || t.employee_id === SATYA_ID).length;
-      if (existingThemesCount >= 4) {
-        showToast("Restriction: Managing Director can post maximum 4 themes", "#ef4444");
-        return;
-      }
-    }
 
     const { error } = await supabase.from('global_themes').insert([themeRecord]);
 
     if (!error) {
-      if (isHOD) {
-        showToast("Strategic Pillar published successfully", "var(--purple)");
-      } else if (isHR) {
-        showToast("Proposal sent to HOD for approval", "var(--purple)");
-      } else {
-        showToast("Theme proposed successfully", "var(--purple)");
-      }
+      showToast(isHOD ? "Strategic Pillar published successfully" : "Proposal sent for HOD approval", "var(--purple)");
       setShowCreator(false);
       setNewDirective({ title: "", description: "", category: "Strategic Contribution", start_date: today, end_date: today });
       refreshEmployeeDash();
@@ -631,7 +630,8 @@ function Employee({ profile, activeUser, showToast }) {
 
     const { error } = await supabase.from('global_themes').insert([{
       ...form,
-      employee_id: activeUser,
+      created_by: activeUser,
+      cycle_id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
       status: 'submitted_to_manager'
     }]);
     if (error) {
@@ -859,14 +859,14 @@ function Employee({ profile, activeUser, showToast }) {
         </div>
       </div>
       {/* 1. STRATEGIC PILLARS HEADER (ONLY ACTIVE THEMES) */}
-      {rootThemes.filter(rt => rt.status === 'active').length > 0 && (
+      {rootThemes.filter(rt => rt.status === 'approved').length > 0 && (
         <div className="frame" style={{ borderLeft: '4px solid var(--purple)', background: '#fff', marginBottom: 16, padding: '16px 24px', borderRadius: 12, boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
           <div className="v-stack" style={{ gap: 4 }}>
             <div className="sec-title" style={{ margin: 0, color: 'var(--purple)', fontSize: 14 }}>| Themes</div>
             <div style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 10 }}>Validated Pillars for Year 2026 Alignment.</div>
           </div>
           <div className="h-stack" style={{ gap: 10, marginTop: 16, marginLeft: 10 }}>
-            {rootThemes.filter(rt => rt.status === 'active').map(rt => (
+            {rootThemes.filter(rt => rt.status === 'approved').map(rt => (
               <div key={rt.id} style={{ padding: '8px 16px', background: 'rgba(124,58,237,0.05)', border: '1px solid var(--purple)', borderRadius: 8, color: 'var(--purple)', fontSize: 12, fontWeight: 700 }}>
                 ◈ {rt.title}
               </div>
@@ -953,10 +953,12 @@ function Employee({ profile, activeUser, showToast }) {
                     <div style={{ fontSize: 9, fontWeight: 800, color: 'var(--purple)', letterSpacing: 1 }}>THEME</div>
                     <div style={{ fontSize: 15, fontWeight: 800, color: '#1a1a1a' }}>{t.title}</div>
                     <div style={{ fontSize: 10, color: 'var(--text3)' }}>
-                      Category: {t.description?.includes('[') ? t.description.split(']')[0].replace('[', '') : 'Strategic Contribution'} • Validation Complete
+                      Category: {t.description?.includes('[') ? t.description.split(']')[0].replace('[', '') : 'Strategic Contribution'} • Origin: <span style={{ color: 'var(--purple)', fontWeight: 800, textTransform: 'uppercase' }}>{t.creator_role || 'System'}</span> • Validation Complete
                     </div>
                   </div>
-                  <Badge cls="green">Active Strategy</Badge>
+                  <Badge cls={t.status === 'approved' ? 'green' : 'orange'}>
+                    {t.status === 'approved' ? 'Active Strategy' : 'Pending HOD Approval'}
+                  </Badge>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 12 }}>
                    {t.description?.includes(']') ? t.description.split(']')[1].trim() : t.description}
@@ -1632,6 +1634,7 @@ function ManagerPortal({ profile, activeUser, showToast }) {
   const [returningThemeId, setReturningThemeId] = useState(null);
   const [themeFeedback, setThemeFeedback] = useState("");
   const [isValidationCollapsed, setIsValidationCollapsed] = useState(false);
+  const [proposedTheme, setProposedTheme] = useState({ title: "", description: "" });
 
   const currentYear = new Date().getFullYear();
   const minDate = `${currentYear}-01-01`;
@@ -1770,7 +1773,7 @@ function ManagerPortal({ profile, activeUser, showToast }) {
     const totalCount = Math.max(1, memberThemes.length);
     
     let overall = 'NO';
-    if (yesCount > totalCount / 2) overall = 'YES';
+    if (yesCount >= 1) overall = 'YES';
     else if (yesCount + neutralCount >= totalCount / 2) overall = 'NEUTRAL';
 
     let existingReview = reviews.filter(r => r.employee_id === employeeId).sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0))[0];
@@ -1804,6 +1807,27 @@ function ManagerPortal({ profile, activeUser, showToast }) {
     } else {
       console.error("❌ Review Submission Error:", error, error.hint, error.details);
       showToast(`Error: ${error.message || "Check console for details"}`, "var(--red)");
+    }
+  }
+
+  async function handleProposeGlobalTheme() {
+    if (!proposedTheme.title || !proposedTheme.description) {
+      showToast("Please fill all fields", "var(--red)");
+      return;
+    }
+    const { error } = await supabase.from('global_themes').insert([{
+      ...proposedTheme,
+      created_by: activeUser,
+      status: 'pending_hod_validation',
+      is_active: false,
+      cycle_id: CYCLE_ID
+    }]);
+    
+    if (!error) {
+      showToast("Global theme proposed for HOD approval", "var(--green)");
+      setProposedTheme({ title: "", description: "" });
+    } else {
+      showToast("Error proposing theme", "var(--red)");
     }
   }
 
@@ -2308,7 +2332,7 @@ function ManagerPortal({ profile, activeUser, showToast }) {
                         const approvedThemes = themesForUser.filter(t => t.status === 'approved');
                         const totalCount = Math.max(1, approvedThemes.length);
 
-                        if (yesCount > totalCount / 2) return <Badge cls="green" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: EXCEEDED (YES)</Badge>;
+                        if (yesCount >= 1) return <Badge cls="green" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: EXCEEDED (YES)</Badge>;
                         if (yesCount + neutralCount >= totalCount / 2) return <Badge cls="gray" style={{ fontSize: 14, padding: '8px 16px', color: 'var(--text1)' }}>OVERALL: DELIVERED (NEUTRAL)</Badge>;
                         return <Badge cls="red" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: NOT MET (NO)</Badge>;
                       })()}
@@ -2334,6 +2358,53 @@ function ManagerPortal({ profile, activeUser, showToast }) {
           );
         })}
       </div>
+
+      {profile?.role !== 'hod' && (
+        <>
+          <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
+            <div className="sec-title" style={{ color: 'var(--purple)' }}>My Proposed Strategy Themes</div>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>Track the status of strategy pillars you have proposed to the HOD.</div>
+            <div className="v-stack" style={{ gap: 12 }}>
+              {rootThemes.filter(t => t.created_by === activeUser).length > 0 ? (
+                rootThemes.filter(t => t.created_by === activeUser).map(t => (
+                  <div key={t.id} className="theme-card" style={{ background: 'var(--bg2)', border: '1px solid var(--border)' }}>
+                    <div className="theme-card-header">
+                      <div className="theme-card-name">{t.title}</div>
+                      <Badge cls={t.status === 'approved' ? 'green' : (t.status === 'rejected' ? 'red' : 'orange')}>
+                        {t.status === 'approved' ? 'Approved & Live' : (t.status === 'rejected' ? 'Rejected' : 'Pending HOD')}
+                      </Badge>
+                    </div>
+                    <div className="theme-card-desc" style={{ fontSize: 11 }}>{t.description}</div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ padding: '16px', textAlign: 'center', fontSize: 11, opacity: 0.5 }}>No themes proposed yet.</div>
+              )}
+            </div>
+          </div>
+
+          <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
+            <div className="sec-title" style={{ color: 'var(--purple)' }}>Propose New Global Strategy Theme</div>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>This theme will be sent to the HOD (Satya/Alex) for approval before becoming active.</div>
+            <div className="v-stack" style={{ gap: 12 }}>
+              <input 
+                className="input" 
+                placeholder="Theme Title (e.g. Innovation First)" 
+                value={proposedTheme.title} 
+                onChange={e => setProposedTheme({ ...proposedTheme, title: e.target.value })} 
+              />
+              <textarea 
+                className="input" 
+                style={{ minHeight: 80 }} 
+                placeholder="Describe the strategic impact and goals..." 
+                value={proposedTheme.description} 
+                onChange={e => setProposedTheme({ ...proposedTheme, description: e.target.value })} 
+              />
+              <button className="btn-primary" style={{ background: 'var(--purple)', border: 'none' }} onClick={handleProposeGlobalTheme}>Send to HOD for Proposal →</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* NEW: TEAM ANNUAL VIEW (YTD 2026) */}
       <div className="frame" style={{ marginTop: 24, padding: 0, overflow: 'hidden' }}>
@@ -2726,6 +2797,7 @@ function HRDashboard({ profile, activeUser, showToast }) {
   const [yesOutcomeCount, setYesOutcomeCount] = useState(0);
   const [cycleThemes, setCycleThemes] = useState([]);
   const [managers, setManagers] = useState([]);
+  const [proposedTheme, setProposedTheme] = useState({ title: "", description: "" });
 
   const completionRate = allProfilesCount > 0 ? Math.round((submissionCount / allProfilesCount) * 100) : 0;
   const overallYesRate = submissionCount > 0 ? Math.round((yesOutcomeCount / submissionCount) * 100) : 0;
@@ -2755,6 +2827,27 @@ function HRDashboard({ profile, activeUser, showToast }) {
     }
   }
 
+  async function handleProposeGlobalTheme() {
+    if (!proposedTheme.title || !proposedTheme.description) {
+      showToast("Please fill all fields", "var(--red)");
+      return;
+    }
+    const { error } = await supabase.from('global_themes').insert([{
+      ...proposedTheme,
+      created_by: activeUser,
+      status: 'pending_hod_validation',
+      is_active: false,
+      cycle_id: CYCLE_ID
+    }]);
+    
+    if (!error) {
+      showToast("Global theme proposed for HOD approval", "var(--green)");
+      setProposedTheme({ title: "", description: "" });
+    } else {
+      showToast("Error proposing theme", "var(--red)");
+    }
+  }
+
   return (
     <div className="page">
       <div className="portal-label">◆ HR DASHBOARD</div>
@@ -2767,18 +2860,60 @@ function HRDashboard({ profile, activeUser, showToast }) {
       </div>
       <div className="frame">
         <div className="sec-title">Manager Requests</div>
-        {cycleThemes.filter(t => !t.parent_id && t.status === 'pending_hr_approval').map(t => (
+        {cycleThemes.filter(t => t.status === 'pending_hod_validation' || t.status === 'pending_hr_approval').map(t => (
           <div key={t.id} className="theme-card">
             <div className="theme-card-header">
               <div><div className="theme-card-name">{t.title}</div></div>
               <div className="h-stack" style={{ gap: 12 }}>
-                <button className="badge badge-green" onClick={() => handleHRAction(t.id, 'approve')}>✓ Approve</button>
-                <button className="badge badge-yellow" onClick={() => handleHRAction(t.id, 'revert')}>↩ Return</button>
+                <Badge cls="orange">Pending HOD</Badge>
               </div>
             </div>
             <div className="theme-card-desc">{t.description}</div>
           </div>
         ))}
+      </div>
+
+      <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
+        <div className="sec-title" style={{ color: 'var(--purple)' }}>Strategy Proposal History</div>
+        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>Full record of strategy proposals and their validation status.</div>
+        <div className="v-stack" style={{ gap: 12 }}>
+          {cycleThemes.filter(t => t.created_by === activeUser || t.status !== 'approved').length > 0 ? (
+            cycleThemes.filter(t => t.created_by === activeUser || t.status !== 'approved').map(t => (
+              <div key={t.id} className="theme-card" style={{ background: 'var(--bg2)', border: '1px solid var(--border)' }}>
+                <div className="theme-card-header">
+                  <div className="theme-card-name">{t.title}</div>
+                  <Badge cls={t.status === 'approved' ? 'green' : (t.status === 'rejected' ? 'red' : 'orange')}>
+                    {t.status === 'approved' ? 'Approved & Live' : (t.status === 'rejected' ? 'Rejected' : 'Pending HOD')}
+                  </Badge>
+                </div>
+                <div className="theme-card-desc" style={{ fontSize: 11 }}>{t.description}</div>
+              </div>
+            ))
+          ) : (
+            <div style={{ padding: '16px', textAlign: 'center', fontSize: 11, opacity: 0.5 }}>No strategy proposals found.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
+        <div className="sec-title" style={{ color: 'var(--purple)' }}>Propose New Global Strategy Theme</div>
+        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>As HR, you can propose new strategic pillars. These will go to the HOD (Satya/Alex) for final validation.</div>
+        <div className="v-stack" style={{ gap: 12 }}>
+          <input 
+            className="input" 
+            placeholder="Theme Title (e.g. Talent Growth)" 
+            value={proposedTheme.title} 
+            onChange={e => setProposedTheme({ ...proposedTheme, title: e.target.value })} 
+          />
+          <textarea 
+            className="input" 
+            style={{ minHeight: 80 }} 
+            placeholder="Describe the strategic impact and goals..." 
+            value={proposedTheme.description} 
+            onChange={e => setProposedTheme({ ...proposedTheme, description: e.target.value })} 
+          />
+          <button className="btn-primary" style={{ background: 'var(--purple)', border: 'none' }} onClick={handleProposeGlobalTheme}>Propose Global Strategy →</button>
+        </div>
       </div>
     </div>
   );
@@ -2838,7 +2973,8 @@ export default function App() {
     profile?.role === 'hod' || profile?.role === 'manager' || profile?.role === 'hr' ? ["director", "◈ Dashboard"] : null,
     ["reports", "◈ Reports"],
     profile?.role === 'hr' ? ["upload", "◈ Data Management"] : null,
-    profile?.role === 'hr' || profile?.role === 'hod' ? ["architecture", "◈ Architecture"] : null
+    profile?.role === 'hr' || profile?.role === 'hod' ? ["architecture", "◈ Architecture"] : null,
+    profile?.role === 'hod' ? ["strategy", "◈ Strategic Themes"] : null
   ].filter(Boolean);
 
   return (
@@ -2872,6 +3008,7 @@ export default function App() {
       {page === "reports" && <Reports profile={profile} activeUser={profile?.id} showToast={showToast} />}
       {page === "upload" && <DataManagement profile={profile} showToast={showToast} />}
       {page === "architecture" && <ArchitecturePage profile={profile} />}
+      {page === "strategy" && <HODPortal profile={profile} showToast={showToast} />}
       <Toast {...toast} />
       <DevImpersonator setProfile={setProfile} setPage={setPage} showToast={showToast} />
     </div>
@@ -3123,7 +3260,10 @@ function HODPortal({ profile, showToast }) {
 
   async function validateTheme(themeId, action) {
     const status = action === 'approve' ? 'approved' : 'rejected';
-    const { error } = await supabase.from('global_themes').update({ status }).eq('id', themeId);
+    const { error } = await supabase.from('global_themes').update({ 
+      status, 
+      is_active: action === 'approve' ? true : false 
+    }).eq('id', themeId);
     if (!error) {
       showToast(action === 'approve' ? "Theme Approved & Broadcasted" : "Theme Rejected", action === 'approve' ? "var(--green)" : "var(--red)");
       fetchThemes();
@@ -3131,8 +3271,18 @@ function HODPortal({ profile, showToast }) {
   }
 
   async function createTheme() {
-    const { error } = await supabase.from('global_themes').insert([{ ...newTheme, created_by: profile.id }]);
-    if (!error) { showToast("Theme created", "var(--green)"); setNewTheme({ title: "", description: "" }); fetchThemes(); }
+    const { error } = await supabase.from('global_themes').insert([{ 
+      ...newTheme, 
+      created_by: profile.id,
+      status: 'approved',
+      is_active: true,
+      cycle_id: CYCLE_ID
+    }]);
+    if (!error) { 
+      showToast("Theme published and active", "var(--green)"); 
+      setNewTheme({ title: "", description: "" }); 
+      fetchThemes(); 
+    }
   }
 
   async function createSubtheme() {
@@ -3141,55 +3291,70 @@ function HODPortal({ profile, showToast }) {
   }
 
   return (
-    <div className="page">
-      <div className="portal-label">◆ HOD CONSOLE</div>
-      <div className="page-title">Strategy <span>& Themes</span></div>
-      <div className="stats-grid" style={{ marginBottom: 32 }}>
-        <div className="frame" style={{ flex: 1 }}>
-          <div className="sec-title" style={{ color: 'var(--purple)' }}>Themes Pending My Validation</div>
+    <div className="page" style={{ paddingBottom: 60 }}>
+      <div className="portal-label">◆ STRATEGY GOVERNANCE</div>
+      <div className="page-title">Approval <span>& Management</span></div>
+      
+      <div className="v-stack" style={{ gap: 32 }}>
+        {/* PROPOSAL QUEUE - FULL WIDTH */}
+        <div className="frame" style={{ borderLeft: '4px solid var(--purple)', background: 'rgba(103,58,183,0.01)' }}>
+          <div className="sec-title" style={{ color: 'var(--purple)' }}>| Strategy Proposal Queue</div>
+          <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>Review and validate incoming strategic pillars from Managers and HR.</div>
           <div className="v-stack" style={{ gap: 12 }}>
-            {themes.filter(t => t.status === 'pending_hod_validation' && new Date(t.created_at).getMonth() === new Date().getMonth() && new Date(t.created_at).getFullYear() === new Date().getFullYear()).length > 0 ? (
-              themes.filter(t => t.status === 'pending_hod_validation' && new Date(t.created_at).getMonth() === new Date().getMonth() && new Date(t.created_at).getFullYear() === new Date().getFullYear()).map(t => (
-                <div key={t.id} className="validation-card" style={{ padding: '12px', background: '#fff', border: '1px solid var(--border)' }}>
-                  <div style={{ fontWeight: 800 }}>{t.title}</div>
-                  <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 10 }}>{t.description}</div>
-                  <div className="h-stack" style={{ gap: 8 }}>
-                    <button className="badge badge-green" onClick={() => validateTheme(t.id, 'approve')}>✓ Approve</button>
-                    <button className="badge badge-red" onClick={() => validateTheme(t.id, 'reject')}>✕ Reject</button>
+            {themes.filter(t => t.status === 'pending_hod_validation').length > 0 ? (
+              themes.filter(t => t.status === 'pending_hod_validation').map(t => (
+                <div key={t.id} className="validation-card" style={{ padding: '20px', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+                  <div className="h-stack" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div className="v-stack" style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a1a' }}>{t.title}</div>
+                      <div style={{ fontSize: 13, opacity: 0.8, marginTop: 6, marginBottom: 16 }}>{t.description}</div>
+                    </div>
+                    <div className="h-stack" style={{ gap: 12, marginLeft: 20 }}>
+                      <button className="badge badge-green" style={{ cursor: 'pointer', padding: '10px 20px', border: 'none', fontWeight: 800, fontSize: 12 }} onClick={() => validateTheme(t.id, 'approve')}>✓ Accept & Go Live</button>
+                      <button className="badge badge-red" style={{ cursor: 'pointer', padding: '10px 20px', border: 'none', fontWeight: 800, fontSize: 12 }} onClick={() => validateTheme(t.id, 'reject')}>✕ Reject</button>
+                    </div>
                   </div>
                 </div>
               ))
-            ) : <div style={{ fontSize: 12, opacity: 0.5 }}>No themes pending validation.</div>}
-          </div>
-        </div>
-
-        <div className="frame" style={{ flex: 1 }}>
-          <div className="sec-title">Create New Function Theme</div>
-          <div className="v-stack" style={{ gap: 12 }}>
-            <input className="input" placeholder="Theme Title" value={newTheme.title} onChange={e => setNewTheme({ ...newTheme, title: e.target.value })} />
-            <textarea className="input" placeholder="Description" value={newTheme.description} onChange={e => setNewTheme({ ...newTheme, description: e.target.value })} />
-            <button className="btn-primary" onClick={createTheme}>Publish Theme →</button>
+            ) : (
+              <div style={{ padding: '40px', textAlign: 'center', background: 'var(--bg2)', borderRadius: 12, border: '1px dashed var(--border)', fontSize: 13, opacity: 0.6 }}>
+                ○ No pending strategy proposals currently.
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      <div className="sec-title" style={{ marginTop: 40, marginBottom: 16 }}>| Current Active Strategies</div>
       <div className="v-stack" style={{ gap: 20 }}>
-        {themes.map(t => (
-          <div key={t.id} className="frame">
-            <div style={{ fontWeight: 800, fontSize: 18, color: 'var(--cyan)' }}>{t.title}</div>
-            <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 16 }}>{t.description}</div>
-            <div className="v-stack" style={{ gap: 8, paddingLeft: 20, borderLeft: '2px solid var(--border)' }}>
-              {t.global_subthemes?.map(st => (
-                <div key={st.id} style={{ fontSize: 12, padding: '8px 12px', background: 'var(--bg2)', borderRadius: 6 }}>
-                   <strong>{st.title}</strong>: {st.description}
+        {themes.filter(t => t.status === 'approved').length > 0 ? (
+          themes.filter(t => t.status === 'approved').map(t => (
+            <div key={t.id} className="frame" style={{ borderTop: '2px solid var(--cyan)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+                <div className="v-stack">
+                  <div style={{ fontWeight: 800, fontSize: 18, color: 'var(--text1)' }}>{t.title}</div>
+                  <div style={{ fontSize: 13, opacity: 0.8 }}>{t.description}</div>
                 </div>
-              ))}
-              <div className="h-stack" style={{ gap: 10, marginTop: 10 }}>
-                <input className="input" style={{ flex: 1 }} placeholder="New Subtheme..." value={newSubtheme.theme_id === t.id ? newSubtheme.title : ""} onChange={e => setNewSubtheme({ ...newSubtheme, theme_id: t.id, title: e.target.value })} />
-                <button className="btn-outline" onClick={() => createSubtheme()}>+ Add</button>
+                <Badge cls="green">ACTIVE & LIVE</Badge>
+              </div>
+              
+              <div className="v-stack" style={{ gap: 10, paddingLeft: 20, borderLeft: '2px solid var(--border)' }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase' }}>Execution Items (Subthemes)</div>
+                {t.global_subthemes?.map(st => (
+                  <div key={st.id} style={{ fontSize: 12, padding: '10px 14px', background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                    <strong>{st.title}</strong>: {st.description}
+                  </div>
+                ))}
+                <div className="h-stack" style={{ gap: 10, marginTop: 10 }}>
+                  <input className="input" style={{ flex: 1, height: 36, fontSize: 12 }} placeholder="New Execution Item..." value={newSubtheme.theme_id === t.id ? newSubtheme.title : ""} onChange={e => setNewSubtheme({ ...newSubtheme, theme_id: t.id, title: e.target.value })} />
+                  <button className="btn-outline" style={{ height: 36, padding: '0 16px', fontSize: 12 }} onClick={() => createSubtheme()}>+ Add Item</button>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))
+        ) : (
+          <div className="frame" style={{ textAlign: 'center', padding: 40, opacity: 0.5 }}>No active strategies found.</div>
+        )}
       </div>
     </div>
   );
