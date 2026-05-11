@@ -1,3 +1,4 @@
+
 -- =============================================
 -- CPM PORTAL: MASTER PRODUCTION SCHEMA (2026)
 -- Optimized for: PostgreSQL Cloud (Amazon RDS / Supabase)
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS global_themes (
     title TEXT NOT NULL,
     description TEXT,
     created_by TEXT,
+    department TEXT, -- Link theme to a specific department
     created_at TIMESTAMPTZ DEFAULT NOW(),
     status TEXT DEFAULT 'active'
 );
