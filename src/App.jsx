@@ -5,8 +5,7 @@ import * as XLSX from 'xlsx';
 import './index.css';
 
 // ── CONFIG & CONSTANTS ──
-const CYCLE_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-const SATYA_ID = '00000000-0000-0000-0000-000000000001'; // New Top Director ID (from hierarchy)
+const CYCLE_ID = import.meta.env.VITE_CYCLE_ID;
 
 function getInitials(p) {
   if (!p) return "??";
@@ -369,8 +368,11 @@ function Employee({ profile, activeUser, showToast }) {
   const [returningSubthemeId, setReturningSubthemeId] = useState(null);
   const [subthemeFeedback, setSubthemeFeedback] = useState("");
 
-  // Calculate team alignments for Bridge View visibility (ONLY CURRENT MONTH)
   const totalTeamAlignments = teamThemes.filter(t => {
+    // ONLY count alignments for team members, NOT for the active user themselves
+    const isTeamMember = (t.employee_id !== activeUser) && (t.assigned_to !== activeUser);
+    if (!isTeamMember) return false;
+
     const desc = t.global_subthemes?.description || t.description;
     if (!desc || !desc.includes('[') || !desc.includes(']')) return false;
     try {
@@ -450,11 +452,17 @@ function Employee({ profile, activeUser, showToast }) {
   async function handleEvidenceSubmit() {
     // We need to find the manager_id for this employee to upsert correctly
     const { data: profileData } = await supabase.from('profiles').select('manager_id').eq('id', activeUser).single();
+    
+    let targetManagerId = profileData?.manager_id;
+    if (!targetManagerId) {
+      const { data: hods } = await supabase.from('profiles').select('id').eq('role', 'hod').limit(1);
+      targetManagerId = hods?.[0]?.id;
+    }
 
     const evidenceData = {
       employee_id: activeUser,
       cycle_id: CYCLE_ID,
-      manager_id: profileData?.manager_id || SATYA_ID,
+      manager_id: targetManagerId,
       emp_achievements: monthlyEvidence.achievements,
       emp_blockers: monthlyEvidence.blockers,
       emp_learning: monthlyEvidence.learning,
@@ -587,7 +595,7 @@ function Employee({ profile, activeUser, showToast }) {
       description: `[${newDirective.category || "General"}] ${newDirective.description.trim()}`,
       created_by: activeUser,
       status: isHOD ? 'approved' : 'pending_hod_validation',
-      cycle_id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      cycle_id: CYCLE_ID,
       is_active: isHOD ? 'true' : 'false'
     };
 
@@ -631,7 +639,7 @@ function Employee({ profile, activeUser, showToast }) {
     const { error } = await supabase.from('global_themes').insert([{
       ...form,
       created_by: activeUser,
-      cycle_id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      cycle_id: CYCLE_ID,
       status: 'submitted_to_manager'
     }]);
     if (error) {
@@ -714,13 +722,13 @@ function Employee({ profile, activeUser, showToast }) {
     // --- RESTRICTION 1: Sub-theme Limit (REMOVED) ---
     // User can now submit multiple sub-themes for the same pillar.
 
-    // --- RESTRICTION 2: MD Theme Limit (Max 4 total) ---
-    // If Satya is creating a NEW root theme (no pId, not an edit)
-    if (activeUser === SATYA_ID && !pId && !existingId) {
-      const myRootThemesCount = rootThemes.filter(rt => rt.created_by === SATYA_ID || rt.employee_id === SATYA_ID).length;
+    // --- RESTRICTION 2: User Theme Limit (Max 4 total) ---
+    // Applies to HOD, HR, and Managers creating new root themes
+    if (['hod', 'hr', 'manager'].includes(profile?.role) && !pId && !existingId) {
+      const myRootThemesCount = rootThemes.filter(rt => rt.created_by === activeUser || rt.employee_id === activeUser).length;
 
       if (myRootThemesCount >= 4) {
-        showToast("Restriction: Managing Director can post maximum 4 themes", "#ef4444");
+        showToast(`Restriction: ${profile.role.toUpperCase()} can post maximum 4 themes`, "#ef4444");
         return;
       }
     }
@@ -1172,7 +1180,7 @@ function Employee({ profile, activeUser, showToast }) {
 
 
       {/* SECTION: TEAM ALIGNMENT TRACKER (MANAGERS ONLY - THE AUTHORITY CONSOLE) */}
-      {(profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') && team.length > 0 && (
+      {(profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') && team.length > 0 && totalTeamAlignments > 0 && (
         <div className="frame" style={{ borderLeft: '4px solid var(--cyan)', background: '#fff', marginTop: 40, padding: isBridgeCollapsed ? '12px 24px' : 24, borderRadius: 12, boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isBridgeCollapsed ? 0 : 24 }}>
              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -1522,7 +1530,7 @@ function Employee({ profile, activeUser, showToast }) {
               myReviews.filter(r => r.employee_id === activeUser).sort((a,b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0)).map((row, idx) => (
                 <tr key={idx} style={{ borderTop: '1px solid var(--bg3)' }}>
                   <td style={{ padding: '10px 0', fontWeight: 700, fontSize: 12, color: '#334155', textTransform: 'capitalize' }}>
-                    {row.submitted_at ? new Date(row.submitted_at).toLocaleString('default', { month: 'long', year: 'numeric' }) : (row.cycle_id === 'ffffffff-ffff-ffff-ffff-ffffffffffff' ? 'April 2026' : row.cycle_id)}
+                    {row.submitted_at ? new Date(row.submitted_at).toLocaleString('default', { month: 'long', year: 'numeric' }) : (row.cycle_id === CYCLE_ID ? 'April 2026' : row.cycle_id)}
                   </td>
                   <td style={{ padding: '10px 0', textAlign: 'center' }}>
                      <div style={{ 
@@ -1594,10 +1602,17 @@ function Employee({ profile, activeUser, showToast }) {
             
             // 2. Ensure a monthly_review record exists so it shows in history
             const { data: profileData } = await supabase.from('profiles').select('manager_id').eq('id', activeUser).single();
+            
+            let targetManagerId = profileData?.manager_id;
+            if (!targetManagerId) {
+              const { data: hods } = await supabase.from('profiles').select('id').eq('role', 'hod').limit(1);
+              targetManagerId = hods?.[0]?.id;
+            }
+
             await supabase.from('monthly_reviews').insert({
                employee_id: activeUser,
                cycle_id: CYCLE_ID,
-               manager_id: profileData?.manager_id || SATYA_ID,
+               manager_id: targetManagerId,
                rating_status: 'PENDING'
             });
 
@@ -2385,7 +2400,7 @@ function ManagerPortal({ profile, activeUser, showToast }) {
 
           <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
             <div className="sec-title" style={{ color: 'var(--purple)' }}>Propose New Global Strategy Theme</div>
-            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>This theme will be sent to the HOD (Satya/Alex) for approval before becoming active.</div>
+            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>This theme will be sent to the HOD for approval before becoming active.</div>
             <div className="v-stack" style={{ gap: 12 }}>
               <input 
                 className="input" 
@@ -2441,7 +2456,10 @@ function ManagerPortal({ profile, activeUser, showToast }) {
                 // Helper to get result for a specific cycle
                 const getResult = (monthPrefix) => {
                   const currentMonthShort = new Date().toLocaleString('en-US', { month: 'short' }).toUpperCase();
-                  const r = memberReviews.find(rev => {
+                  // SORT BY LATEST FIRST so we show the most recent submission for that cycle
+                  const sortedReviews = [...memberReviews].sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0));
+                  
+                  const r = sortedReviews.find(rev => {
                     if (rev.cycle_id === `${monthPrefix}_2026`) return true;
                     if (rev.cycle_id === CYCLE_ID && monthPrefix === currentMonthShort) return true;
                     if (rev.submitted_at) {
@@ -2897,7 +2915,7 @@ function HRDashboard({ profile, activeUser, showToast }) {
 
       <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
         <div className="sec-title" style={{ color: 'var(--purple)' }}>Propose New Global Strategy Theme</div>
-        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>As HR, you can propose new strategic pillars. These will go to the HOD (Satya/Alex) for final validation.</div>
+        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 16 }}>As HR, you can propose new strategic pillars. These will go to the HOD for final validation.</div>
         <div className="v-stack" style={{ gap: 12 }}>
           <input 
             className="input" 
