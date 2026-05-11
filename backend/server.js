@@ -6,7 +6,8 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
+const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -16,10 +17,78 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/postgres',
+  connectionString: process.env.DATABASE_URL,
 });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
+const CYCLE_ID = process.env.CYCLE_ID;
+
+// --- AUTHENTICATION MIDDLEWARE ---
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    // For development, if no token provided, we allow it but with no user info
+    // In production, return res.sendStatus(401);
+    return next();
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+};
+
+// --- N8N AUTOMATION TRIGGER ---
+async function triggerN8nWebhook(table, payload) {
+  const webhookUrl = process.env.N8N_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  try {
+    const data = Array.isArray(payload) ? payload[0] : payload;
+    const employeeId = data.employee_id || data.created_by;
+
+    if (!employeeId) return;
+
+    // Fetch full employee profile for n8n
+    const { rows } = await pool.query('SELECT * FROM profiles WHERE id = $1', [employeeId]);
+    const employee = rows[0];
+
+    if (!employee) return;
+
+    const body = JSON.stringify({
+      employee: employee,
+      [table === 'monthly_reviews' ? 'review' : 'theme']: data,
+      timestamp: new Date().toISOString()
+    });
+
+    const url = new URL(webhookUrl);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      console.log(`n8n webhook response: ${res.statusCode}`);
+    });
+
+    req.on('error', (e) => {
+      console.error(`n8n webhook error: ${e.message}`);
+    });
+
+    req.write(body);
+    req.end();
+  } catch (err) {
+    console.error("Failed to trigger n8n webhook:", err);
+  }
+}
 
 // --- AUTHENTICATION ---
 app.post('/api/db/auth/signup', async (req, res) => {
@@ -106,7 +175,7 @@ app.post('/api/db/storage/remove', (req, res) => {
 });
 
 // --- RPC CALLS ---
-app.post('/api/db/rpc', async (req, res) => {
+app.post('/api/db/rpc', authenticateToken, async (req, res) => {
   const { fn, params } = req.body;
   try {
     if (fn === 'get_reports_hierarchy') {
@@ -121,7 +190,7 @@ app.post('/api/db/rpc', async (req, res) => {
 });
 
 // --- SMART QUERY BUILDER (Replaces Supabase .from()) ---
-app.post('/api/db/query', async (req, res) => {
+app.post('/api/db/query', authenticateToken, async (req, res) => {
   const { table, action, query, payload } = req.body;
   try {
     let sql = '';
@@ -169,6 +238,16 @@ app.post('/api/db/query', async (req, res) => {
             sql = `SELECT t.*, p.role as creator_role 
                    FROM global_themes t 
                    LEFT JOIN profiles p ON t.created_by = p.id`;
+            
+            // --- RBAC: HODs only see their department's themes ---
+            if (req.user) {
+                const { rows: profileRows } = await pool.query('SELECT role, department FROM profiles WHERE id = $1', [req.user.id]);
+                const user = profileRows[0];
+                if (user && user.role === 'hod' && user.department) {
+                    query.filters = query.filters || [];
+                    query.filters.push({ type: 'eq', col: 'department', val: user.department });
+                }
+            }
         } else {
             sql = `SELECT * FROM ${table}`;
         }
@@ -215,12 +294,30 @@ app.post('/api/db/query', async (req, res) => {
         // --- SECURITY: MD Theme Limit (Max 4) ---
         if (table === 'global_themes') {
             const creatorId = payload[0].created_by;
-            const SATYA_ID = '00000000-0000-0000-0000-000000000001';
             
-            if (creatorId === SATYA_ID) {
-                const { rows } = await pool.query('SELECT count(*) FROM global_themes WHERE created_by = $1 AND (status = \'active\' OR status = \'approved\')', [SATYA_ID]);
-                if (parseInt(rows[0].count) >= 4) {
-                    return res.status(403).json({ data: null, error: 'Restriction: Managing Director can post maximum 4 themes.' });
+            // Look up the creator's role dynamically
+            const { rows: profileRows } = await pool.query('SELECT role FROM profiles WHERE id = $1', [creatorId]);
+            const creatorRole = profileRows[0]?.role;
+
+            // --- DEPARTMENT-WIDE LIMIT: Max 4 themes total per department ---
+            if (['hod', 'hr', 'manager'].includes(creatorRole)) {
+                // 1. Get the creator's department
+                const { rows: creatorRows } = await pool.query('SELECT department FROM profiles WHERE id = $1', [creatorId]);
+                const dept = creatorRows[0]?.department;
+
+                if (dept) {
+                    // 2. Count total themes already in this department
+                    const { rows: deptCountRows } = await pool.query(
+                        "SELECT count(*) FROM global_themes WHERE department = $1 AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')", 
+                        [dept]
+                    );
+                    
+                    if (parseInt(deptCountRows[0].count) >= 4) {
+                        return res.status(403).json({ data: null, error: `Restriction: The ${dept} department already has a maximum of 4 themes.` });
+                    }
+
+                    // 3. Automatically tag the new theme with the department
+                    payload.forEach(row => row.department = dept);
                 }
             }
         }
@@ -317,6 +414,15 @@ app.post('/api/db/query', async (req, res) => {
             data = null;
         }
 
+        // Trigger n8n automation for specific tables (DISABLED - Commented out)
+        /*
+        if (action === 'insert' || action === 'upsert') {
+            if (table === 'monthly_reviews' || table === 'global_subthemes') {
+                triggerN8nWebhook(table, payload);
+            }
+        }
+        */
+
         return res.json({ data, count, error: null });
     } else {
         return res.json({ data: null, error: 'Unhandled query type' });
@@ -330,11 +436,13 @@ app.post('/api/db/sync-governance', async (req, res) => {
   try {
     // 1. Move pending/active themes from others to the HOD queue
     await pool.query(
-      "UPDATE global_themes SET status = 'pending_hod_validation', is_active = 'false', cycle_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff' WHERE (status = 'active' OR status IS NULL) AND created_by != '00000000-0000-0000-0000-000000000001'"
+      "UPDATE global_themes SET status = 'pending_hod_validation', is_active = 'false', cycle_id = $1 WHERE (status = 'active' OR status IS NULL)",
+      [CYCLE_ID]
     );
     // 2. Ensure all 'approved' themes have the correct cycle_id and active flag
     const { rowCount } = await pool.query(
-      "UPDATE global_themes SET cycle_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff', is_active = 'true' WHERE status = 'approved'"
+      "UPDATE global_themes SET cycle_id = $1, is_active = 'true' WHERE status = 'approved'",
+      [CYCLE_ID]
     );
     res.json({ success: true, repaired: rowCount });
   } catch (err) {
@@ -343,6 +451,17 @@ app.post('/api/db/sync-governance', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Pure Postgres Backend server running on http://localhost:${PORT}`);
+  
+  // DEBUG: Check database tables on startup
+  try {
+    const { rows } = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
+    console.log("Database Connected. Available Tables:", rows.map(r => r.table_name).join(', '));
+    if (!rows.find(r => r.table_name === 'profiles')) {
+       console.error("WARNING: 'profiles' table not found in the 'public' schema!");
+    }
+  } catch (err) {
+    console.error("Database connection check failed:", err.message);
+  }
 });
