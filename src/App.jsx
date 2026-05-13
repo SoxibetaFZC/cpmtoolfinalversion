@@ -542,8 +542,8 @@ function Employee({ profile, activeUser, showToast }) {
     setSelectedSubthemes(alignments?.map(a => a.subtheme_id) || []);
     setThemes(alignments || []); // Using alignments as the base for themes in UI
 
-    // NEW: Populate Team & TeamThemes for the Bridge View (Managers/Directors)
-    if (profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') {
+    // NEW: Populate Team & TeamThemes for the Bridge View (Managers/Directors/MD)
+    if (profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr' || profile?.role === 'md') {
       let reports = [];
       if (profile?.role === 'hr') {
         const { data } = await supabase.from('profiles').select('*');
@@ -587,7 +587,7 @@ function Employee({ profile, activeUser, showToast }) {
   async function handleProposeStrategicTheme() {
     if (!newDirective.title) return;
 
-    const isHOD = profile?.role === 'hod';
+    const isHOD = profile?.role === 'hod' || profile?.role === 'md';
     const isHR = profile?.role === 'hr';
 
     const themeRecord = {
@@ -754,21 +754,32 @@ function Employee({ profile, activeUser, showToast }) {
     try {
       if (existingId) {
         // --- EDIT MODE: Update existing sub-theme ---
-        // 1. Get the subtheme_id from the alignment record
         const { data: alignData } = await supabase.from('employee_subtheme_alignment').select('subtheme_id').eq('id', existingId).single();
         if (alignData?.subtheme_id) {
-          // 2. Update global_subthemes
           await supabase.from('global_subthemes').update({
             title: subthemeRecord.title,
             description: subthemeRecord.description
           }).eq('id', alignData.subtheme_id);
           
-          // 3. Reset alignment status to PENDING
-          await supabase.from('employee_subtheme_alignment').update({ status: 'PENDING' }).eq('id', existingId);
+          let nextStatus = 'PENDING';
+          const userRole = profile?.role;
+          
+          if (userRole === 'manager') nextStatus = 'PENDING_HR_VALIDATION';
+          else if (userRole === 'hr') nextStatus = 'PENDING_HOD_VALIDATION';
+          else if (userRole === 'hod') nextStatus = 'PENDING_MD_VALIDATION';
+          
+          // Force MD validation for cross-departmental HOD/HR submissions
+          if (userRole === 'hod' || userRole === 'hr') {
+            const parentTheme = rootThemes.find(rt => rt.id === pId);
+            if (parentTheme && parentTheme.department !== profile.department && parentTheme.department !== null) {
+              nextStatus = 'PENDING_MD_VALIDATION';
+            }
+          }
+
+          await supabase.from('employee_subtheme_alignment').update({ status: nextStatus }).eq('id', existingId);
         }
       } else {
         // --- NEW MODE: Insert new sub-theme ---
-        // 1. Insert the sub-theme
         const { data: stData, error: stError } = await supabase
           .from('global_subthemes')
           .insert([subthemeRecord])
@@ -777,13 +788,28 @@ function Employee({ profile, activeUser, showToast }) {
         
         if (stError) throw stError;
 
-        // 2. Automatically align this sub-theme to the current employee
         if (stData) {
+          let nextStatus = 'PENDING';
+          const userRole = profile?.role;
+          
+          if (userRole === 'manager') nextStatus = 'PENDING_HR_VALIDATION';
+          else if (userRole === 'hr') nextStatus = 'PENDING_HOD_VALIDATION';
+          else if (userRole === 'hod') nextStatus = 'PENDING_MD_VALIDATION';
+
+          // Force MD validation for cross-departmental HOD/HR submissions
+          if (userRole === 'hod' || userRole === 'hr') {
+            const parentTheme = rootThemes.find(rt => rt.id === pId);
+            if (parentTheme && parentTheme.department !== profile.department && parentTheme.department !== null) {
+              nextStatus = 'PENDING_MD_VALIDATION';
+              showToast("Cross-departmental sub-theme sent to MD for validation", "var(--purple)");
+            }
+          }
+
           const alignmentRecord = {
             employee_id: targetId,
             subtheme_id: stData.id,
             cycle_year: CURRENT_YEAR,
-            status: 'PENDING'
+            status: nextStatus
           };
           const { error: alignError } = await supabase.from('employee_subtheme_alignment').insert([alignmentRecord]);
           if (alignError) console.warn("⚠️ Alignment auto-link failed:", alignError);
@@ -877,7 +903,7 @@ function Employee({ profile, activeUser, showToast }) {
           <div className="h-stack" style={{ gap: 10, marginTop: 16, marginLeft: 10 }}>
             {rootThemes.filter(rt => rt.status === 'approved').map(rt => (
               <div key={rt.id} style={{ padding: '8px 16px', background: 'rgba(124,58,237,0.05)', border: '1px solid var(--purple)', borderRadius: 8, color: 'var(--purple)', fontSize: 12, fontWeight: 700 }}>
-                ◈ {rt.title}
+                ◈ {rt.title} {profile?.role === 'md' && <span style={{ opacity: 0.6, fontSize: 10, marginLeft: 6 }}>[{rt.department || 'Global'}]</span>}
               </div>
             ))}
           </div>
@@ -908,7 +934,7 @@ function Employee({ profile, activeUser, showToast }) {
       <div className="frame" style={{ borderLeft: '4px solid var(--cyan)', background: '#fff', marginTop: 12, padding: '12px 20px', borderRadius: 12, boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <div className="sec-title" style={{ margin: 0, fontSize: 13, color: 'var(--cyan)' }}>| My Execution Items — Themes</div>
-            {(monthlyEvidence.rating_status !== 'APPROVED') && (profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') && (
+            {(monthlyEvidence.rating_status !== 'APPROVED') && (profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr' || profile?.role === 'md') && (
               <button
                 className="btn-link"
                 style={{ color: 'var(--cyan)', fontSize: 12, fontWeight: 700, textDecoration: 'none', background: 'none', border: 'none', cursor: 'pointer' }}
@@ -920,8 +946,8 @@ function Employee({ profile, activeUser, showToast }) {
           </div>
 
           <div className="theme-notice" style={{ background: 'rgba(0,178,236,0.02)', border: '1px solid rgba(0,178,236,0.1)', padding: '8px 12px', borderRadius: 8, fontSize: 11, marginBottom: 12 }}>
-            <span style={{ color: 'var(--cyan)' }}>ℹ</span> {(profile?.role === 'manager' || profile?.role === 'hod')
-              ? "As a manager/HOD, you can propose Strategic Themes to HR. For your own review, align your work to HOD pillars."
+            <span style={{ color: 'var(--cyan)' }}>ℹ</span> {(profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'md')
+              ? "As a manager/HOD/MD, you can propose Strategic Themes. For your own review, align your work to the pillars."
               : "Select a Theme to add your monthly execution details (subthemes)."}
           </div>
 
@@ -960,7 +986,7 @@ function Employee({ profile, activeUser, showToast }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
                   <div className="v-stack" style={{ gap: 2 }}>
                     <div style={{ fontSize: 9, fontWeight: 800, color: 'var(--purple)', letterSpacing: 1 }}>THEME</div>
-                    <div style={{ fontSize: 15, fontWeight: 800, color: '#1a1a1a' }}>{t.title}</div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: '#1a1a1a' }}>{t.title} {profile?.role === 'md' && <span style={{ opacity: 0.5, fontSize: 11, fontWeight: 600, marginLeft: 8 }}>[{t.department || 'Global'}]</span>}</div>
                     <div style={{ fontSize: 10, color: 'var(--text3)' }}>
                       Category: {t.description?.includes('[') ? t.description.split(']')[0].replace('[', '') : 'Strategic Contribution'} • Origin: <span style={{ color: 'var(--purple)', fontWeight: 800, textTransform: 'uppercase' }}>{t.creator_role || 'System'}</span> • Validation Complete
                     </div>
@@ -1021,11 +1047,17 @@ function Employee({ profile, activeUser, showToast }) {
                               <Badge cls={
                                 sub.status === 'APPROVED' ? 'green' : 
                                 (sub.status === 'REJECTED' ? 'red' : 
-                                (sub.status === 'REVERTED' ? 'yellow' : 'yellow'))
+                                (sub.status === 'REVERTED' ? 'yellow' : 
+                                (sub.status === 'PENDING_MD_VALIDATION' ? 'purple' : 
+                                (sub.status === 'PENDING_HOD_VALIDATION' ? 'blue' :
+                                (sub.status === 'PENDING_HR_VALIDATION' ? 'cyan' : 'yellow')))))
                               }>
                                 {sub.status === 'APPROVED' ? 'Approved' : 
                                 (sub.status === 'REJECTED' ? 'Rejected' : 
-                                (sub.status === 'REVERTED' ? 'Reverted' : 'Pending'))}
+                                (sub.status === 'REVERTED' ? 'Reverted' : 
+                                (sub.status === 'PENDING_MD_VALIDATION' ? 'Pending (MD)' : 
+                                (sub.status === 'PENDING_HOD_VALIDATION' ? 'Pending (HOD)' :
+                                (sub.status === 'PENDING_HR_VALIDATION' ? 'Pending (HR)' : 'Pending')))))}
                               </Badge>
                             </div>
                           </div>
@@ -1180,8 +1212,8 @@ function Employee({ profile, activeUser, showToast }) {
 
 
 
-      {/* SECTION: TEAM ALIGNMENT TRACKER (MANAGERS ONLY - THE AUTHORITY CONSOLE) */}
-      {(profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr') && team.length > 0 && totalTeamAlignments > 0 && (
+      {/* SECTION: TEAM ALIGNMENT TRACKER (MANAGERS/HOD/HR/MD - THE AUTHORITY CONSOLE) */}
+      {(profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr' || profile?.role === 'md') && team.length > 0 && totalTeamAlignments > 0 && (
         <div className="frame" style={{ borderLeft: '4px solid var(--cyan)', background: '#fff', marginTop: 40, padding: isBridgeCollapsed ? '12px 24px' : 24, borderRadius: 12, boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isBridgeCollapsed ? 0 : 24 }}>
              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -1207,11 +1239,17 @@ function Employee({ profile, activeUser, showToast }) {
           {!isBridgeCollapsed && totalTeamAlignments > 0 && (
             <div className="v-stack" style={{ gap: 24, marginTop: 16 }}>
             {team.filter(m => m.id !== activeUser).map(m => {
-              // Filter out future-dated sub-themes (Enterprise Standard)
-              const todayStr = new Date().toISOString().split('T')[0];
               const reportsThemes = teamThemes.filter(t => {
                 const isOwner = t.employee_id === m.id || t.assigned_to === m.id;
                 if (!isOwner) return false;
+
+                // --- HIERARCHICAL FILTER ---
+                const targetStatus = 
+                  profile?.role === 'md' ? 'PENDING_MD_VALIDATION' :
+                  profile?.role === 'hod' ? 'PENDING_HOD_VALIDATION' :
+                  profile?.role === 'hr' ? 'PENDING_HR_VALIDATION' : 'PENDING';
+                
+                if (t.status !== targetStatus) return false;
                 
                 const desc = t.global_subthemes?.description || t.description;
                 if (!desc || !desc.includes('[') || !desc.includes(']')) return true;
@@ -1834,8 +1872,8 @@ function ManagerPortal({ profile, activeUser, showToast }) {
     const { error } = await supabase.from('global_themes').insert([{
       ...proposedTheme,
       created_by: activeUser,
-      status: 'pending_hod_validation',
-      is_active: false,
+      status: profile?.role === 'md' ? 'approved' : 'pending_hod_validation',
+      is_active: profile?.role === 'md' ? true : false,
       cycle_id: CYCLE_ID
     }]);
     
@@ -2343,14 +2381,22 @@ function ManagerPortal({ profile, activeUser, showToast }) {
                         const results = binaryInputs.themeResults || {};
                         const vals = typeof results === 'object' ? Object.values(results) : [];
                         const yesCount = vals.filter(v => v === 'YES').length;
+                        const noCount = vals.filter(v => v === 'NO').length;
                         const neutralCount = vals.filter(v => v === 'NEUTRAL').length;
                         
-                        const approvedThemes = themesForUser.filter(t => t.status === 'approved');
-                        const totalCount = Math.max(1, approvedThemes.length);
+                        // --- NEW MAJORITY LOGIC ---
+                        // 1 Yes, 0 No -> YES
+                        // 1 No, 0 Yes -> NO
+                        // 2 Yes, 1 No -> YES
+                        // 2 No, 1 Yes -> NO
+                        // Tie (e.g. 1 Yes, 1 No) -> Defaults to YES for positivity
+                        const overall = (yesCount >= noCount && (yesCount + neutralCount > 0)) ? 'YES' : 'NO';
 
-                        if (yesCount >= 1) return <Badge cls="green" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: EXCEEDED (YES)</Badge>;
-                        if (yesCount + neutralCount >= totalCount / 2) return <Badge cls="gray" style={{ fontSize: 14, padding: '8px 16px', color: 'var(--text1)' }}>OVERALL: DELIVERED (NEUTRAL)</Badge>;
-                        return <Badge cls="red" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: NOT MET (NO)</Badge>;
+                        if (overall === 'YES') {
+                          return <Badge cls="green" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: {yesCount >= noCount ? 'DELIVERED (YES)' : 'EXCEEDED (YES)'}</Badge>;
+                        } else {
+                          return <Badge cls="red" style={{ fontSize: 14, padding: '8px 16px' }}>OVERALL: NOT MET (NO)</Badge>;
+                        }
                       })()}
                     </div>
                   </div>
@@ -2375,7 +2421,7 @@ function ManagerPortal({ profile, activeUser, showToast }) {
         })}
       </div>
 
-      {profile?.role !== 'hod' && (
+      {profile?.role !== 'hod' && profile?.role !== 'md' && (
         <>
           <div className="frame" style={{ marginTop: 24, borderLeft: '4px solid var(--purple)' }}>
             <div className="sec-title" style={{ color: 'var(--purple)' }}>My Proposed Strategy Themes</div>
@@ -2854,8 +2900,8 @@ function HRDashboard({ profile, activeUser, showToast }) {
     const { error } = await supabase.from('global_themes').insert([{
       ...proposedTheme,
       created_by: activeUser,
-      status: 'pending_hod_validation',
-      is_active: false,
+      status: profile?.role === 'md' ? 'approved' : 'pending_hod_validation',
+      is_active: profile?.role === 'md' ? true : false,
       cycle_id: CYCLE_ID
     }]);
     
@@ -2986,14 +3032,14 @@ export default function App() {
   }
 
   const TABS = [
-    profile?.role === 'hod' || profile?.role === 'hr' ? ["overview", "○ Overview"] : null,
+    profile?.role === 'hod' || profile?.role === 'hr' || profile?.role === 'md' ? ["overview", "○ Overview"] : null,
     ["employee", "○ My Reviews"],
-    profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr' ? ["manager", "◈ Manager"] : null,
-    profile?.role === 'hod' || profile?.role === 'manager' || profile?.role === 'hr' ? ["director", "◈ Dashboard"] : null,
+    profile?.role === 'manager' || profile?.role === 'hod' || profile?.role === 'hr' || profile?.role === 'md' ? ["manager", "◈ Manager"] : null,
+    profile?.role === 'hod' || profile?.role === 'manager' || profile?.role === 'hr' || profile?.role === 'md' ? ["director", "◈ Dashboard"] : null,
     ["reports", "◈ Reports"],
-    profile?.role === 'hr' ? ["upload", "◈ Data Management"] : null,
-    profile?.role === 'hr' || profile?.role === 'hod' ? ["architecture", "◈ Architecture"] : null,
-    profile?.role === 'hod' ? ["strategy", "◈ Strategic Themes"] : null
+    profile?.role === 'hr' || profile?.role === 'md' ? ["upload", "◈ Data Management"] : null,
+    profile?.role === 'hr' || profile?.role === 'hod' || profile?.role === 'md' ? ["architecture", "◈ Architecture"] : null,
+    profile?.role === 'hod' || profile?.role === 'md' ? ["strategy", "◈ Strategic Themes"] : null
   ].filter(Boolean);
 
   return (
