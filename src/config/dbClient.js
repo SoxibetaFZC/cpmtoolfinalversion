@@ -17,6 +17,7 @@ class QueryBuilder {
     return this; 
   }
   eq(col, val) { this.query.filters.push({ type: 'eq', col, val }); return this; }
+  ilike(col, val) { this.query.filters.push({ type: 'ilike', col, val }); return this; }
   in(col, valArr) { this.query.filters.push({ type: 'in', col, val: valArr }); return this; }
   insert(data) { this.action = 'insert'; this.payload = Array.isArray(data) ? data : [data]; return this; }
   update(data) { this.action = 'update'; this.payload = data; return this; }
@@ -24,11 +25,17 @@ class QueryBuilder {
   order(col, options = { ascending: true }) { this.query.order.push({ col, ascending: options?.ascending !== false }); return this; }
   or(filters) { this.query.filters.push({ type: 'or', val: filters }); return this; }
   single() { this.query.options = { ...this.query.options, single: true }; return this; }
+  maybeSingle() { this.query.options = { ...this.query.options, single: true }; return this; }
   limit(n) { this.query.options = { ...this.query.options, limit: n }; return this; }
   async execute() {
     try {
+      const token = localStorage.getItem('token');
       const response = await fetch(`${BACKEND_URL}/query`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', 
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': token ? `Bearer ${token}` : ''
+        },
         body: JSON.stringify({ table: this.table, action: this.action, query: this.query, payload: this.payload })
       });
       const result = await response.json();
@@ -42,8 +49,13 @@ export const db = {
   from: (table) => new QueryBuilder(table),
   rpc: async (fn, params) => {
     try {
+      const token = localStorage.getItem('token');
       const response = await fetch(`${BACKEND_URL}/rpc`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', 
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': token ? `Bearer ${token}` : ''
+        },
         body: JSON.stringify({ fn, params })
       });
       const result = await response.json();
