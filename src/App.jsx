@@ -722,13 +722,14 @@ function Employee({ profile, activeUser, showToast }) {
     // --- RESTRICTION 1: Sub-theme Limit (REMOVED) ---
     // User can now submit multiple sub-themes for the same pillar.
 
-    // --- RESTRICTION 2: User Theme Limit (Max 4 total) ---
-    // Applies to HOD, HR, and Managers creating new root themes
+    // --- RESTRICTION 2: Shared Theme Limit (Max 4 total) ---
+    // Applies collectively to HOD, HR, and Managers creating new root themes
     if (['hod', 'hr', 'manager'].includes(profile?.role) && !pId && !existingId) {
-      const myRootThemesCount = rootThemes.filter(rt => rt.created_by === activeUser || rt.employee_id === activeUser).length;
+      // Count ALL root themes currently active/approved in the system
+      const totalRootThemesCount = rootThemes.length;
 
-      if (myRootThemesCount >= 4) {
-        showToast(`Restriction: ${profile.role.toUpperCase()} can post maximum 4 themes`, "#ef4444");
+      if (totalRootThemesCount >= 4) {
+        showToast(`Restriction: Maximum 4 Strategic Themes reached for this cycle.`, "#ef4444");
         return;
       }
     }
