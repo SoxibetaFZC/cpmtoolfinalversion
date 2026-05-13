@@ -95,10 +95,12 @@ app.post('/api/db/auth/signup', async (req, res) => {
   const { email, password, data } = req.body;
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    // Insert into profiles or a custom users table
+    // Use ON CONFLICT to update password if the email already exists (Activation Flow)
     const { rows } = await pool.query(
       `INSERT INTO profiles (id, auth_email, first_name, last_name, role, password_hash) 
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5) RETURNING *`,
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5) 
+       ON CONFLICT (auth_email) DO UPDATE SET password_hash = EXCLUDED.password_hash
+       RETURNING *`,
       [email, data?.first_name, data?.last_name, data?.role || 'employee', hashedPassword]
     );
     const userRow = rows[0];
@@ -201,10 +203,22 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
       if (table === 'global_themes' && query.select.includes('global_subthemes')) {
           let baseQuery = 'SELECT * FROM global_themes';
           let baseParams = [];
+          
+          // --- RBAC: Departmental Isolation ---
+          if (req.user) {
+              const { rows: profileRows } = await pool.query('SELECT role, department FROM profiles WHERE id = $1', [req.user.id]);
+              const user = profileRows[0];
+              if (user && user.department) {
+                  baseQuery += ' WHERE (department = $1 OR department IS NULL)';
+                  baseParams.push(user.department);
+              }
+          }
+
           if (query.filters && query.filters.length > 0) {
               const filter = query.filters[0];
+              const whereOrAnd = baseQuery.includes('WHERE') ? ' AND ' : ' WHERE ';
               if (filter.type === 'eq') {
-                  baseQuery += ' WHERE ' + filter.col + ' = $1';
+                  baseQuery += whereOrAnd + filter.col + ' = $' + (baseParams.length + 1);
                   baseParams.push(filter.val);
               }
           }
@@ -239,14 +253,21 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                    FROM global_themes t 
                    LEFT JOIN profiles p ON t.created_by = p.id`;
             
-            // --- RBAC: HODs only see their department's themes ---
+            // --- RBAC: Departmental Isolation ---
             if (req.user) {
                 const { rows: profileRows } = await pool.query('SELECT role, department FROM profiles WHERE id = $1', [req.user.id]);
                 const user = profileRows[0];
-                if (user && user.role === 'hod' && user.department) {
+                console.log(`[DEBUG] User ${req.user.email} (Role: ${user?.role}) fetching themes for department: ${user?.department}`);
+                
+                // Everyone is restricted to their department.
+                if (user && user.department) {
                     query.filters = query.filters || [];
-                    query.filters.push({ type: 'eq', col: 'department', val: user.department });
+                    console.log(`[DEBUG] Applying department filter for: ${user.department}`);
+                    // Users see themes from their department OR themes that are explicitly marked as global (department is NULL)
+                    query.filters.push({ type: 'or', val: `department.eq.${user.department},department.is.null` });
                 }
+            } else {
+                console.log(`[DEBUG] Anonymous request for themes - skipping isolation filters.`);
             }
         } else {
             sql = `SELECT * FROM ${table}`;
@@ -258,6 +279,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                const colPrefix = table === 'global_themes' ? 't.' : '';
                if (f.type === 'eq') {
                    clauses.push(`${colPrefix}"${f.col}" = $${valIndex++}`); values.push(f.val);
+               } else if (f.type === 'ilike') {
+                   clauses.push(`${colPrefix}"${f.col}" ILIKE $${valIndex++}`); values.push(f.val);
                } else if (f.type === 'in') {
                    clauses.push(`${colPrefix}"${f.col}" = ANY($${valIndex++})`); values.push(f.val);
                } else if (f.type === 'or') {
@@ -278,6 +301,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                  }
             });
             if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
+            console.log(`[DEBUG] Final SQL: ${sql}`);
+            console.log(`[DEBUG] Values: ${JSON.stringify(values)}`);
         }
 
           if (query.order && query.order.length > 0) {
@@ -299,24 +324,24 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
             const { rows: profileRows } = await pool.query('SELECT role FROM profiles WHERE id = $1', [creatorId]);
             const creatorRole = profileRows[0]?.role;
 
-            // --- DEPARTMENT-WIDE LIMIT: Max 4 themes total per department ---
+            // --- DEPARTMENTAL LIMIT: Max 4 themes per department ---
             if (['hod', 'hr', 'manager'].includes(creatorRole)) {
-                // 1. Get the creator's department
+                // 1. Get creator's department
                 const { rows: creatorRows } = await pool.query('SELECT department FROM profiles WHERE id = $1', [creatorId]);
                 const dept = creatorRows[0]?.department;
 
-                if (dept) {
-                    // 2. Count total themes already in this department
-                    const { rows: deptCountRows } = await pool.query(
-                        "SELECT count(*) FROM global_themes WHERE department = $1 AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')", 
-                        [dept]
-                    );
-                    
-                    if (parseInt(deptCountRows[0].count) >= 4) {
-                        return res.status(403).json({ data: null, error: `Restriction: The ${dept} department already has a maximum of 4 themes.` });
-                    }
+                // 2. Count themes ONLY in this department
+                const { rows: countRows } = await pool.query(
+                    "SELECT count(*) FROM global_themes WHERE department = $1 AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')",
+                    [dept]
+                );
+                
+                if (parseInt(countRows[0].count) >= 4) {
+                    return res.status(403).json({ data: null, error: `Restriction: The ${dept} department already has the maximum of 4 strategic themes.` });
+                }
 
-                    // 3. Automatically tag the new theme with the department
+                // 3. Automatically tag the new theme with the creator's department
+                if (dept) {
                     payload.forEach(row => row.department = dept);
                 }
             }
@@ -346,6 +371,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                  }
               });
               if (clauses.length > 0) sql += ' WHERE ' + clauses.join(' AND ');
+             console.log(`[DEBUG] Final SQL: ${sql}`);
+             console.log(`[DEBUG] Values: ${JSON.stringify(values)}`);
         }
         sql += ' RETURNING *';
     }
