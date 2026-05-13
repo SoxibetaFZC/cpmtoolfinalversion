@@ -208,7 +208,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
           if (req.user) {
               const { rows: profileRows } = await pool.query('SELECT role, department FROM profiles WHERE id = $1', [req.user.id]);
               const user = profileRows[0];
-              if (user && user.department) {
+              // MD and HR (if needed) can be exempted here for full oversight
+              if (user && user.department && user.role !== 'md') {
                   baseQuery += ' WHERE (department = $1 OR department IS NULL)';
                   baseParams.push(user.department);
               }
@@ -259,8 +260,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                 const user = profileRows[0];
                 console.log(`[DEBUG] User ${req.user.email} (Role: ${user?.role}) fetching themes for department: ${user?.department}`);
                 
-                // Everyone is restricted to their department.
-                if (user && user.department) {
+                // MD is exempted from isolation for full oversight.
+                if (user && user.department && user.role !== 'md') {
                     query.filters = query.filters || [];
                     console.log(`[DEBUG] Applying department filter for: ${user.department}`);
                     // Users see themes from their department OR themes that are explicitly marked as global (department is NULL)
@@ -316,36 +317,38 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
       }
     } 
     else if (action === 'insert') {
-        // --- SECURITY: MD Theme Limit (Max 4) ---
-        if (table === 'global_themes') {
-            const creatorId = payload[0].created_by;
+            // --- SECURITY: Theme Limit (Max 4) ---
+            // This limit applies to HODs, HR, Managers (departmental) and MDs (global)
             
-            // Look up the creator's role dynamically
-            const { rows: profileRows } = await pool.query('SELECT role FROM profiles WHERE id = $1', [creatorId]);
-            const creatorRole = profileRows[0]?.role;
-
-            // --- DEPARTMENTAL LIMIT: Max 4 themes per department ---
             if (['hod', 'hr', 'manager'].includes(creatorRole)) {
                 // 1. Get creator's department
                 const { rows: creatorRows } = await pool.query('SELECT department FROM profiles WHERE id = $1', [creatorId]);
                 const dept = creatorRows[0]?.department;
 
-                // 2. Count themes ONLY in this department
+                // 2. Count themes in this department PLUS global themes (which are also visible)
                 const { rows: countRows } = await pool.query(
-                    "SELECT count(*) FROM global_themes WHERE department = $1 AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')",
+                    "SELECT count(*) FROM global_themes WHERE (department = $1 OR department IS NULL) AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')",
                     [dept]
                 );
                 
                 if (parseInt(countRows[0].count) >= 4) {
-                    return res.status(403).json({ data: null, error: `Restriction: The ${dept} department already has the maximum of 4 strategic themes.` });
+                    return res.status(403).json({ data: null, error: `Restriction: Your department already has the maximum of 4 strategic themes (including global themes).` });
                 }
 
                 // 3. Automatically tag the new theme with the creator's department
                 if (dept) {
                     payload.forEach(row => row.department = dept);
                 }
+            } else if (creatorRole === 'md') {
+                // MD is limited to 4 global themes
+                const { rows: countRows } = await pool.query(
+                    "SELECT count(*) FROM global_themes WHERE department IS NULL AND (status = 'active' OR status = 'approved' OR status = 'pending_hod_validation')"
+                );
+                
+                if (parseInt(countRows[0].count) >= 4) {
+                    return res.status(403).json({ data: null, error: "Restriction: The MD has already reached the maximum of 4 global strategic themes." });
+                }
             }
-        }
 
         const columns = Object.keys(payload[0]);
         const placeholders = [];
