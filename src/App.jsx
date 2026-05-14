@@ -6,6 +6,7 @@ import './index.css';
 
 // ── CONFIG & CONSTANTS ──
 const CYCLE_ID = import.meta.env.VITE_CYCLE_ID;
+const AVATAR_COLORS = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#06b6d4'];
 
 function getInitials(p) {
   if (!p) return "??";
@@ -2566,6 +2567,8 @@ function DirectorPortal({ profile, activeUser, showToast }) {
   const [validationRate, setValidationRate] = useState(0);
   const [governancePillars, setGovernancePillars] = useState([]);
   const [branches, setBranches] = useState([]);
+  const [allProfiles, setAllProfiles] = useState([]);
+  const [allReviews, setAllReviews] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -2575,9 +2578,14 @@ function DirectorPortal({ profile, activeUser, showToast }) {
   async function fetchDirectorData() {
     setLoading(true);
     // 1. Fetch ALL data for Organisation Analytics
-    const { data: allProfiles } = await supabase.from('profiles').select('*');
-    const { data: allReviews } = await supabase.from('monthly_reviews').select('*').eq('cycle_id', CYCLE_ID);
+    const { data: pData } = await supabase.from('profiles').select('*');
+    const { data: rData } = await supabase.from('monthly_reviews').select('*'); // Remove .eq('cycle_id') to allow historical heatmap
     const { data: allThemes } = await supabase.from('global_themes').select('*').eq('cycle_id', CYCLE_ID);
+
+    setAllProfiles(pData || []);
+    setAllReviews(rData || []);
+    const allReviews = rData || []; // For immediate use below
+    const allProfiles = pData || []; // For immediate use below
 
     // 2. Fetch the Managers reporting to this Director (for the legacy branch view if needed)
     const managers = allProfiles?.filter(p => p.manager_id === activeUser) || [];
@@ -2713,34 +2721,85 @@ function DirectorPortal({ profile, activeUser, showToast }) {
         </div>
       </div>
 
-      {/* 3. HEAT MAP - LIGHT MODE */}
+      {/* 3. HEAT MAP - DYNAMIC (12 MONTHS) */}
       <div className="frame" style={{ background: 'rgba(0,178,236,0.01)', border: '1px dashed var(--cyan)' }}>
         <div style={{ color: 'var(--text1)', fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Performance Heat Map — {profile?.role === 'hr' ? 'Global' : profile?.function} YES Rate</div>
         <div style={{ color: 'var(--text3)', fontSize: 12, marginBottom: 20 }}>Darker teal = higher Yes rate per {profile?.role === 'hr' ? 'function' : 'sub-function'}.</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '100px repeat(6, 1fr)', gap: 6 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '100px repeat(12, 1fr)', gap: 4 }}>
           <div />
-          {['Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr'].map(m => <div key={m} style={{ textAlign: 'center', fontSize: 10, color: 'var(--text3)', fontWeight: 800 }}>{m}</div>)}
-          {deptRates.map(d => (
-            <React.Fragment key={d.n}>
-              <div style={{ fontSize: 12, color: 'var(--text2)', fontWeight: 600, display: 'flex', alignItems: 'center' }}>{d.n}</div>
-              {[70, 72, 68, 73, 74, d.v].map((v, i) => (
-                <div key={i} style={{ background: `rgba(0,178,236, ${v / 150})`, padding: '10px 0', borderRadius: 4, textAlign: 'center', color: v > 72 ? '#fff' : 'var(--cyan)', fontSize: 11, fontWeight: 800, border: '1px solid rgba(0,178,236,0.1)' }}>{v}%</div>
-              ))}
-            </React.Fragment>
-          ))}
+          {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map(m => <div key={m} style={{ textAlign: 'center', fontSize: 9, color: 'var(--text3)', fontWeight: 800 }}>{m}</div>)}
+          {deptRates.map(d => {
+            const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+            const monthlyValues = months.map(month => {
+              const reviewsInMonth = allReviews?.filter(r => {
+                const isCorrectMonth = r.cycle_id?.startsWith(month) || (r.submitted_at && new Date(r.submitted_at).toLocaleString('en-US', { month: 'short' }).toUpperCase() === month);
+                if (!isCorrectMonth) return false;
+                
+                const empProfile = allProfiles?.find(p => p.id === r.employee_id);
+                return (empProfile?.sub_function || empProfile?.function) === d.n;
+              }) || [];
+              
+              if (reviewsInMonth.length === 0) return 0;
+              const yesCount = reviewsInMonth.filter(r => r.overall_result === 'YES').length;
+              return Math.round((yesCount / reviewsInMonth.length) * 100);
+            });
+
+            return (
+              <React.Fragment key={d.n}>
+                <div style={{ fontSize: 10, color: 'var(--text2)', fontWeight: 600, display: 'flex', alignItems: 'center', lineHeight: 1.1 }}>{d.n}</div>
+                {monthlyValues.map((v, i) => (
+                  <div key={i} style={{ 
+                    background: v === 0 ? 'var(--bg2)' : `rgba(0,178,236, ${v / 150})`, 
+                    padding: '8px 0', 
+                    borderRadius: 3, 
+                    textAlign: 'center', 
+                    color: v > 72 ? '#fff' : 'var(--cyan)', 
+                    fontSize: 10, 
+                    fontWeight: 800, 
+                    border: '1px solid rgba(0,178,236,0.1)',
+                    opacity: v === 0 ? 0.3 : 1
+                  }}>{v}%</div>
+                ))}
+              </React.Fragment>
+            );
+          })}
         </div>
       </div>
 
-      {/* 4. TREND ANALYSIS - LIGHT MODE */}
+      {/* 4. TREND ANALYSIS - DYNAMIC (12 MONTHS) */}
       <div className="frame" style={{ background: '#fff' }}>
-        <div className="sec-title" style={{ fontSize: 15 }}>6-Month Trend Analysis</div>
-        <div style={{ height: 180, position: 'relative', display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', padding: '0 20px', background: 'var(--bg2)', borderRadius: 8, marginTop: 12 }}>
-          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', overflow: 'visible' }}>
-            <path d="M 0 100 L 80 95 L 160 98 L 240 92 L 320 90 L 400 88" fill="none" stroke="var(--cyan)" strokeWidth="3" />
-            <path d="M 0 80 L 80 78 L 160 82 L 240 75 L 320 72 L 400 70" fill="none" stroke="var(--purple)" strokeWidth="3" />
-            <path d="M 0 120 L 80 118 L 160 122 L 240 115 L 320 112 L 400 110" fill="none" stroke="var(--yellow)" strokeWidth="3" />
+        <div className="sec-title" style={{ fontSize: 15 }}>Annual Performance Trend (12 Months)</div>
+        <div style={{ height: 180, position: 'relative', display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', padding: '0 40px', background: 'var(--bg2)', borderRadius: 8, marginTop: 12 }}>
+          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', overflow: 'visible' }} preserveAspectRatio="none" viewBox="0 0 1200 180">
+            {deptRates.map((d, dIdx) => {
+              const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+              const points = months.map((month, mIdx) => {
+                const reviewsInMonth = allReviews?.filter(r => {
+                  const isCorrectMonth = r.cycle_id?.startsWith(month) || (r.submitted_at && new Date(r.submitted_at).toLocaleString('en-US', { month: 'short' }).toUpperCase() === month);
+                  if (!isCorrectMonth) return false;
+                  const empProfile = allProfiles?.find(p => p.id === r.employee_id);
+                  return (empProfile?.sub_function || empProfile?.function) === d.n;
+                }) || [];
+                const yesRate = reviewsInMonth.length > 0 ? (reviewsInMonth.filter(r => r.overall_result === 'YES').length / reviewsInMonth.length) : 0.5;
+                const x = (mIdx / (months.length - 1)) * 1200;
+                const y = 180 - (yesRate * 150) - 15;
+                return `${x},${y}`;
+              });
+              
+              return (
+                <path 
+                  key={d.n}
+                  d={`M ${points.join(' L ')}`} 
+                  fill="none" 
+                  stroke={AVATAR_COLORS[dIdx % AVATAR_COLORS.length]} 
+                  strokeWidth="3" 
+                  strokeLinecap="round"
+                  style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))' }}
+                />
+              );
+            })}
           </svg>
-          {['Nov 24', 'Dec 24', 'Jan 25', 'Feb 25', 'Mar 25', 'Apr 25'].map(m => <div key={m} style={{ fontSize: 10, color: 'var(--text3)' }}>{m}</div>)}
+          {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map(m => <div key={m} style={{ fontSize: 9, color: 'var(--text3)', fontWeight: 600 }}>{m}</div>)}
         </div>
       </div>
 
